@@ -15,6 +15,9 @@ h5py>=3.7.0
 jupyter>=1.0.0
 ipykernel>=6.0.0
 
+# Keyboard input handling
+pynput>=1.7.6
+
 # Optional: Additional ML libraries (uncomment as needed)
 # scikit-learn>=1.1.0
 # tensorflow>=2.10.0
