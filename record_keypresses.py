@@ -9,6 +9,7 @@ Maps:
 - W -> "up"
 - S -> "down"
 - D -> "right"
+- X -> "unknown"
 - Space -> "blink"
 
 Press ESC to stop recording.
@@ -43,6 +44,7 @@ class KeypressRecorder:
             'w': 'up',
             's': 'down',
             'd': 'right',
+            'x': 'unknown',
             ' ': 'blink'  # space
         }
     
@@ -97,7 +99,7 @@ class KeypressRecorder:
 # Recording started: {self.start_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}
 # Sampling rate: 1000 Hz (1 sample per millisecond)
 # Columns: sample_number, timestamp_ms, elapsed_ms, label
-# Labels: stare, left, up, down, right, blink
+# Labels: stare, left, up, down, right, unknown, blink
 # Press ESC to stop recording
 # EndOfHeader
 """
@@ -124,6 +126,7 @@ class KeypressRecorder:
         print("  W = up")
         print("  S = down")
         print("  D = right")
+        print("  X = unknown")
         print("  SPACE = blink")
         print("  (no key) = stare")
         print()
@@ -225,6 +228,7 @@ Key mappings:
   W = up
   S = down
   D = right
+  X = unknown
   SPACE = blink
   (no key) = stare
         """
