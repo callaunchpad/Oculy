@@ -176,7 +176,7 @@ class KeypressRecorder:
                             break
                         
                         # Periodic status update
-                        if self.sample_count % 1000 == 0:
+                        if self.sample_count % 333 == 0:
                             print(f"Samples recorded: {self.sample_count} ({elapsed_ms/1000:.1f}s) - Current: {state}")
                     
                     # Small sleep to prevent CPU spinning
