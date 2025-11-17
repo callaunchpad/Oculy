@@ -9,7 +9,7 @@ from typing import Dict, List, Sequence
 
 import pandas as pd
 
-
+## python3 split_test_train.py --input test_output_devin.csv --output-dir test_splits
 def _validate_ratios(train: float, val: float, test: float | None) -> Dict[str, float]:
     """Ensure the provided ratios are positive and sum to 1."""
 
@@ -59,11 +59,54 @@ def _assign_groups(
     return assignments
 
 
-def _build_movement_ids(labels: pd.Series) -> pd.Series:
-    """Create contiguous movement identifiers whenever labels change."""
+def _build_movement_ids(
+    labels: pd.Series, timestamps: pd.Series, buffer_seconds: float = 0.1
+) -> pd.Series:
+    """Create contiguous movement identifiers whenever labels change, with buffer zones.
+    
+    For each label transition at time T:
+    - The previous movement is extended forward to include rows up to T + buffer
+    - The next movement is extended backward to include rows from T - buffer
+    """
 
     label_changes = labels.fillna("__NA__").ne(labels.fillna("__NA__").shift(fill_value="__NA__"))
-    movement_ids = label_changes.cumsum()
+    base_movement_ids = label_changes.cumsum()
+    
+    # Find transition points (where labels change)
+    transition_indices = labels.index[label_changes].tolist()
+    
+    # Convert buffer to milliseconds
+    buffer_ms = buffer_seconds * 1000.0
+    
+    # Create a copy to modify
+    movement_ids = base_movement_ids.copy()
+    
+    # For each transition, extend the previous movement forward and next movement backward
+    for trans_idx in transition_indices:
+        if trans_idx == labels.index[0]:  # Skip first row (no previous movement)
+            continue
+        
+        trans_timestamp = timestamps.loc[trans_idx]
+        buffer_start = trans_timestamp - buffer_ms
+        buffer_end = trans_timestamp + buffer_ms
+        
+        # Get the movement IDs before and after transition
+        prev_idx = labels.index[labels.index < trans_idx]
+        if len(prev_idx) == 0:
+            continue
+        prev_movement_id = base_movement_ids.loc[prev_idx[-1]]
+        next_movement_id = base_movement_ids.loc[trans_idx]
+        
+        # Extend previous movement forward: include rows with timestamps in (T, T + buffer]
+        # These rows currently have the next movement ID, but we extend the previous movement to include them
+        prev_mask = (timestamps > trans_timestamp) & (timestamps <= buffer_end)
+        movement_ids.loc[prev_mask] = prev_movement_id
+        
+        # Extend next movement backward: include rows with timestamps in [T - buffer, T)
+        # These rows currently have the previous movement ID, but we extend the next movement to include them
+        next_mask = (timestamps >= buffer_start) & (timestamps < trans_timestamp)
+        movement_ids.loc[next_mask] = next_movement_id
+    
     movement_ids.name = "movement_id"
     return movement_ids
 
@@ -84,6 +127,8 @@ def split_dataset(
     test_ratio: float | None,
     label_column: str,
     seed: int,
+    timestamp_column: str = "timestamp_epoch_ms",
+    buffer_seconds: float = 0.1,
 ) -> None:
     """Split the dataset into train/val/test sets, keeping whole movements together."""
 
@@ -91,9 +136,13 @@ def split_dataset(
     df = pd.read_csv(input_csv)
     if label_column not in df.columns:
         raise ValueError(f"Column '{label_column}' was not found in {input_csv}.")
+    if timestamp_column not in df.columns:
+        raise ValueError(f"Column '{timestamp_column}' was not found in {input_csv}.")
 
     df = df.copy()
-    df["_movement_id"] = _build_movement_ids(df[label_column])
+    df["_movement_id"] = _build_movement_ids(
+        df[label_column], df[timestamp_column], buffer_seconds=buffer_seconds
+    )
     group_sizes = df.groupby("_movement_id").size()
 
     assignments = _assign_groups(group_sizes, ratios, seed)
@@ -151,6 +200,17 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed used to shuffle movement groups before splitting (default: %(default)s).",
     )
+    parser.add_argument(
+        "--timestamp-column",
+        default="timestamp_epoch_ms",
+        help="Name of the timestamp column for buffer calculations (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--buffer-seconds",
+        type=float,
+        default=0.1,
+        help="Buffer time in seconds to include before and after each event split (default: %(default)s).",
+    )
     return parser.parse_args()
 
 
@@ -166,6 +226,8 @@ def main() -> None:
         test_ratio=args.test_ratio,
         label_column=args.label_column,
         seed=args.seed,
+        timestamp_column=args.timestamp_column,
+        buffer_seconds=args.buffer_seconds,
     )
 
 
