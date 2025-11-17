@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -76,7 +77,32 @@ def parse_opensignals_txt(file_path: str | Path) -> Tuple[Dict, pd.DataFrame]:
     )
     df = pd.DataFrame(numeric_rows, columns=inferred_columns)
 
+    if "timestamp_epoch_ms" not in df.columns:
+        epoch_series = _compute_timestamp_epoch(metadata, len(df))
+        if epoch_series is not None:
+            df["timestamp_epoch_ms"] = epoch_series
+
     return metadata, df
+
+
+def _compute_timestamp_epoch(
+    metadata: Dict, num_rows: int, timezone_offset_ms: float | None = None
+) -> np.ndarray | None:
+    """Return per-sample epoch timestamps (ms) if metadata supplies date/time."""
+
+    if num_rows <= 0:
+        return None
+
+    start_epoch_ms = _metadata_epoch_start_ms(metadata)
+    sampling_rate = _extract_opensignals_sampling_rate(metadata)
+    if start_epoch_ms is None or sampling_rate <= 0:
+        return None
+
+    if timezone_offset_ms is not None:
+        start_epoch_ms += timezone_offset_ms
+
+    ms_per_sample = 1000.0 / sampling_rate
+    return start_epoch_ms + np.arange(num_rows, dtype=float) * ms_per_sample
 
 
 def _extract_opensignals_sampling_rate(metadata: Dict, default: float = 1000.0) -> float:
@@ -91,6 +117,39 @@ def _extract_opensignals_sampling_rate(metadata: Dict, default: float = 1000.0) 
         return float(rate)
     except (TypeError, ValueError):
         return default
+
+
+def _metadata_epoch_start_ms(metadata: Dict) -> float | None:
+    """Parse the recording start timestamp from metadata and convert to epoch ms."""
+
+    if not metadata:
+        return None
+
+    device_info = next(iter(metadata.values()), {})
+    date_str = device_info.get("date")
+    time_str = device_info.get("time")
+    if not date_str or not time_str:
+        return None
+
+    date_time = _parse_datetime_string(f"{date_str} {time_str}")
+    if not date_time:
+        return None
+
+    start_dt = date_time.replace(tzinfo=timezone.utc)
+    return start_dt.timestamp() * 1000.0
+
+
+def _parse_datetime_string(value: str) -> datetime | None:
+    """Parse a variety of datetime string formats."""
+
+    value = value.strip()
+    formats = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d")
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def parse_keypress_labels(file_path: str | Path) -> Tuple[Dict[str, str], pd.DataFrame]:
@@ -159,6 +218,41 @@ def _infer_keypress_sampling_rate(header_info: Dict[str, str], default: float = 
     return default
 
 
+def _infer_timezone_offset_ms(
+    header_info: Dict[str, str],
+    keypress_df: pd.DataFrame,
+    timestamp_col: str,
+    elapsed_col: str,
+) -> float | None:
+    """Estimate timezone offset between header timestamps and epoch values."""
+
+    if keypress_df.empty:
+        return None
+
+    start_value = None
+    for key, value in header_info.items():
+        if key.lower().startswith("recording started"):
+            start_value = value
+            break
+
+    if not start_value:
+        return None
+
+    start_dt = _parse_datetime_string(start_value)
+    if not start_dt:
+        return None
+
+    header_epoch_ms = start_dt.replace(tzinfo=timezone.utc).timestamp() * 1000.0
+
+    timestamps = keypress_df[timestamp_col].to_numpy(dtype=float)
+    elapsed = keypress_df[elapsed_col].to_numpy(dtype=float)
+    sample_window = min(100, len(timestamps))
+    approx_start_epoch = float(np.median(timestamps[:sample_window] - elapsed[:sample_window]))
+
+    offset = approx_start_epoch - header_epoch_ms
+    return float(round(offset))
+
+
 def merge_opensignals_and_keypress(
     opensignals_path: str | Path,
     keypress_path: str | Path,
@@ -184,11 +278,68 @@ def merge_opensignals_and_keypress(
 
     opensignals_rate = _extract_opensignals_sampling_rate(metadata)
     keypress_rate = _infer_keypress_sampling_rate(keypress_metadata)
+    timezone_offset_ms = _infer_timezone_offset_ms(
+        keypress_metadata, keypress_df, timestamp_col, elapsed_col
+    )
 
     if opensignals_rate <= 0:
         raise ValueError(f"Invalid OpenSignals sampling rate: {opensignals_rate}")
     if keypress_rate <= 0:
         raise ValueError(f"Invalid keypress sampling rate: {keypress_rate}")
+
+    epoch_values = _compute_timestamp_epoch(metadata, len(opensignals_df), timezone_offset_ms)
+    if epoch_values is None:
+        raise ValueError(
+            "Unable to compute OpenSignals epoch timestamps from metadata; "
+            "ensure the header declares date/time."
+        )
+    opensignals_df["timestamp_epoch_ms"] = epoch_values
+
+    open_timestamps = opensignals_df["timestamp_epoch_ms"].to_numpy()
+    open_start = float(np.min(open_timestamps))
+    open_end = float(np.max(open_timestamps))
+
+    trimmed_keypress_df = keypress_df[
+        (keypress_df[timestamp_col] >= open_start) & (keypress_df[timestamp_col] <= open_end)
+    ].copy()
+    trimmed_keypress_df.sort_values(timestamp_col, inplace=True)
+    trimmed_keypress_df.reset_index(drop=True, inplace=True)
+
+    if trimmed_keypress_df.empty:
+        raise ValueError(
+            "No keypress labels fall within the OpenSignals recording interval "
+            f"({open_start} ms to {open_end} ms)."
+        )
+
+    trimmed_count = len(keypress_df) - len(trimmed_keypress_df)
+    if trimmed_count > 0:
+        print(f"Trimmed {trimmed_count} keypress rows outside the OpenSignals window.")
+
+    key_min = float(trimmed_keypress_df[timestamp_col].min())
+    key_max = float(trimmed_keypress_df[timestamp_col].max())
+    open_mask = (open_timestamps >= key_min) & (open_timestamps <= key_max)
+    if not np.any(open_mask):
+        raise ValueError(
+            "OpenSignals recording does not overlap the keypress timestamp interval "
+            f"({key_min} ms to {key_max} ms)."
+        )
+
+    dropped_open = int(len(opensignals_df) - open_mask.sum())
+    if dropped_open > 0:
+        print(f"Dropped {dropped_open} OpenSignals samples outside the keypress window.")
+    opensignals_df = opensignals_df.loc[open_mask].reset_index(drop=True)
+    open_timestamps = opensignals_df["timestamp_epoch_ms"].to_numpy()
+    open_start = float(np.min(open_timestamps))
+    open_end = float(np.max(open_timestamps))
+
+    trimmed_keypress_df = trimmed_keypress_df[
+        (trimmed_keypress_df[timestamp_col] >= open_start)
+        & (trimmed_keypress_df[timestamp_col] <= open_end)
+    ].reset_index(drop=True)
+    if trimmed_keypress_df.empty:
+        raise ValueError(
+            "All keypress labels were trimmed after aligning with the OpenSignals window."
+        )
 
     samples_per_keypress = opensignals_rate / keypress_rate
     if samples_per_keypress <= 0:
@@ -196,28 +347,18 @@ def merge_opensignals_and_keypress(
             "Computed samples_per_keypress <= 0. Check sampling rates in the input files."
         )
 
-    open_indices = np.arange(len(opensignals_df), dtype=float)
-    raw_keypress_position = open_indices / samples_per_keypress
-    keypress_indices = np.floor(raw_keypress_position).astype(int)
-    max_idx = len(keypress_df) - 1
+    keypress_interval_ms = 1000.0 / keypress_rate
+    keypress_timestamps = trimmed_keypress_df[timestamp_col].to_numpy()
+    keypress_indices = np.searchsorted(keypress_timestamps, open_timestamps, side="right") - 1
+    keypress_indices = np.clip(keypress_indices, 0, len(trimmed_keypress_df) - 1)
 
-    if keypress_indices.max() > max_idx:
-        print(
-            "Warning: Keypress data is shorter than OpenSignals duration. "
-            "Repeating the final label for remaining samples."
-        )
-        overflow_mask = keypress_indices > max_idx
-        keypress_indices[overflow_mask] = max_idx
-        raw_keypress_position[overflow_mask] = keypress_indices[overflow_mask]
-
-    within_fraction = raw_keypress_position - keypress_indices
+    within_fraction = (open_timestamps - keypress_timestamps[keypress_indices]) / keypress_interval_ms
     within_fraction = np.clip(within_fraction, 0.0, 1.0)
 
-    keypress_interval_ms = 1000.0 / keypress_rate
-    label_values = keypress_df[label_col].to_numpy()
-    timestamp_values = keypress_df[timestamp_col].to_numpy()
-    elapsed_values = keypress_df[elapsed_col].to_numpy()
-    sample_values = keypress_df[sample_col].to_numpy()
+    label_values = trimmed_keypress_df[label_col].to_numpy()
+    timestamp_values = trimmed_keypress_df[timestamp_col].to_numpy()
+    elapsed_values = trimmed_keypress_df[elapsed_col].to_numpy()
+    sample_values = trimmed_keypress_df[sample_col].to_numpy()
 
     combined = opensignals_df.reset_index(drop=True).copy()
     combined["label"] = label_values[keypress_indices]
@@ -228,6 +369,24 @@ def merge_opensignals_and_keypress(
     combined["keypress_timestamp_ms"] = (
         timestamp_values[keypress_indices] + within_fraction * keypress_interval_ms
     )
+
+    non_stare_mask = combined["label"].astype(str).str.lower() != "stare"
+    if non_stare_mask.any():
+        first_idx = int(np.argmax(non_stare_mask.to_numpy()))
+        if first_idx > 0:
+            print(f"Dropping {first_idx} baseline samples before first non-'stare' label.")
+            combined = combined.iloc[first_idx:].reset_index(drop=True)
+    else:
+        print("Warning: No non-'stare' labels found; retaining all rows.")
+
+    if not combined.empty:
+        end_timestamp = float(combined["timestamp_epoch_ms"].iloc[-1])
+        cutoff = end_timestamp - 2000.0
+        trimmed_combined = combined[combined["timestamp_epoch_ms"] < cutoff].reset_index(drop=True)
+        removed_tail = len(combined) - len(trimmed_combined)
+        if removed_tail > 0:
+            print(f"Removed {removed_tail} samples from the final 2 seconds of recording.")
+        combined = trimmed_combined
 
     return metadata, keypress_metadata, combined
 
@@ -241,8 +400,8 @@ def _write_output(df: pd.DataFrame, output_path: str) -> str:
 
 def main() -> None:
 
-    open_signals_path = "data/sample_data/opensignals_84BA20AEBFDA_2025-10-04_12-25-49.txt"
-    keypress_path = "keypress_labels_2025-11-02_18-00-51.txt"
+    open_signals_path = "/Users/adelinac/Documents/Oculy/data/Devin/Devinsample.txt"
+    keypress_path = "/Users/adelinac/Documents/Oculy/data/Devin/Devin-macbookkeypress_labels_2025-11-09_18-10-46.txt"
 
     metadata, keypress_metadata, combined_df = merge_opensignals_and_keypress(
         open_signals_path, keypress_path
@@ -255,7 +414,7 @@ def main() -> None:
     print(f"\n=== Combined data (first 5 rows) ===")
     print(combined_df.head())
 
-    output_path = "test_output_1.csv"
+    output_path = "test_output_devin.csv"
     saved_path = _write_output(combined_df, output_path)
     print(f"\nCombined data saved to {saved_path}")
 
