@@ -254,6 +254,7 @@ def preprocess_for_cnn(
     output_path: str | Path | None = None,
     window_length: int | None = None,
     normalization_method: str = "pad_truncate",
+    channels_to_use: List[str] | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """Preprocess EOG data for 1D CNN training.
     
@@ -263,6 +264,7 @@ def preprocess_for_cnn(
         output_path: Optional path to save preprocessed data (.npz file)
         window_length: Target window length. If None, uses median segment length.
         normalization_method: Method for normalizing segment lengths
+        channels_to_use: List of channel names to use (e.g., ['A4']). If None, uses all signal channels.
     
     Returns:
         X: Feature array of shape (n_segments, window_length, n_channels)
@@ -319,13 +321,47 @@ def preprocess_for_cnn(
     # Extract signal channels (exclude metadata columns we added)
     # Use columns from aligned_df but exclude the ones we added during alignment
     added_cols = {"label", "signal_timestamp_ms", "label_timestamp_ms"}
-    signal_cols = [col for col in aligned_df.columns if col not in added_cols]
+    all_signal_cols = [col for col in aligned_df.columns if col not in added_cols]
+    
+    # Filter to only requested channels if specified
+    if channels_to_use is not None:
+        available_channels = set(all_signal_cols)
+        # Convert requested channels to match available column types
+        # Handle both string and int channel identifiers
+        requested_channels = set()
+        for ch in channels_to_use:
+            # Try to match the channel
+            if ch in available_channels:
+                requested_channels.add(ch)
+            elif isinstance(ch, str) and ch.isdigit():
+                # Convert string number to int if columns are ints
+                ch_int = int(ch)
+                if ch_int in available_channels:
+                    requested_channels.add(ch_int)
+                else:
+                    requested_channels.add(ch)  # Will fail in check below
+            elif isinstance(ch, int):
+                # Try as string if columns are strings
+                if str(ch) in available_channels:
+                    requested_channels.add(str(ch))
+                else:
+                    requested_channels.add(ch)  # Will fail in check below
+            else:
+                requested_channels.add(ch)  # Will fail in check below
+        
+        missing_channels = requested_channels - available_channels
+        if missing_channels:
+            raise ValueError(f"Requested channels not found: {missing_channels}. Available channels: {available_channels}")
+        signal_cols = [col for col in all_signal_cols if col in requested_channels]
+    else:
+        signal_cols = all_signal_cols
+    
     n_channels = len(signal_cols)
     
     if n_channels == 0:
         raise ValueError("No signal channels found in data. Check column extraction.")
     
-    print(f"  Using {n_channels} signal channels: {signal_cols[:5]}..." if len(signal_cols) > 5 else f"  Using {n_channels} signal channels: {signal_cols}")
+    print(f"  Using {n_channels} signal channel(s): {signal_cols}")
     
     # Build feature matrix and label array
     X_list = []
