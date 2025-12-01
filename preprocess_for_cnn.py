@@ -310,8 +310,38 @@ def preprocess_for_cnn(
     # Step 5: Normalize segment lengths
     print("\n[5/6] Normalizing segment lengths...")
     if window_length is None:
-        window_length = overall_median
-        print(f"  Using median length as window size: {window_length} samples")
+        # Determine longest non-"stare" event so stares can be cropped accordingly
+        priority_labels = {"left", "right", "up", "down", "blink"}
+        longest_non_stare = 0
+        fallback_longest = 0
+        for label, label_stats in stats.items():
+            if label.startswith("_"):
+                continue
+            label_name = str(label).lower()
+            if label_name == "stare":
+                continue
+            lengths = label_stats.get("lengths", [])
+            if lengths:
+                max_length = max(lengths)
+                if label_name in priority_labels:
+                    longest_non_stare = max(longest_non_stare, max_length)
+                fallback_longest = max(fallback_longest, max_length)
+
+        if longest_non_stare == 0:
+            longest_non_stare = fallback_longest
+
+        if longest_non_stare > 0:
+            window_length = longest_non_stare
+            print(
+                "  Using longest non-'stare' segment for window size: "
+                f"{window_length} samples"
+            )
+        else:
+            window_length = overall_median
+            print(
+                "  No non-'stare' segments found; falling back to median "
+                f"window size: {window_length} samples"
+            )
     else:
         print(f"  Using specified window size: {window_length} samples")
     
@@ -429,4 +459,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

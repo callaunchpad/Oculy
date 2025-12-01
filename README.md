@@ -91,5 +91,12 @@ The project includes Jupyter notebooks that demonstrate:
 - Loading and parsing OpenSignals data files (.txt and .h5 formats)
 - Signal filtering and preprocessing
 - Feature extraction from EOG signals
+
+## Data Collection
+- Red connects to right of temple, black connects to left. 
+- Connect to EEG channel and open OpenSignals.
+- Run labelling script and start recording
+- Label full left look with "A" and return to origin as "D"
+
 - Synthetic EOG signal generation for testing
 - Visualization of eye movement patterns
