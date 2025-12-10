@@ -561,15 +561,15 @@ client.start()
 plt.pause(0.5)
 print("✅ Ready! Press '5' to start acquisition once OpenSignals is running.")
 
-def refresh_plot():
-    """GUI-safe background thread that updates the live plot."""
-    while True:
-        while not update_queue.empty():
-            val = update_queue.get()
-            plotter.update(val)
-        time.sleep(0.01)
+# def refresh_plot():
+#     """GUI-safe background thread that updates the live plot."""
+#     while True:
+#         while not update_queue.empty():
+#             val = update_queue.get()
+#             plotter.update(val)
+#         time.sleep(0.01)
 
-threading.Thread(target=refresh_plot, daemon=True).start()
+# threading.Thread(target=refresh_plot, daemon=True).start()
 
 # Command loop
 while True:
