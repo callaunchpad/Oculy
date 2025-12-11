@@ -21,6 +21,17 @@ EYE_ACTION_FILE = "/Users/neharavikumar/Oculy/game.txt"  # Placeholder filename 
 last_eye_action = None  # "left", "right", "blink", etc.
 last_file_mod_time = 0
 
+# ------------------------------
+# POSITION-BASED (INTEGRAL) CONTROL
+# ------------------------------
+# eye_position accumulates movements over time
+# This helps because brief "return to center" movements 
+# don't fully cancel out intentional sustained looks
+eye_position = 0.0
+EYE_SENSITIVITY = 8  # How much each frame of left/right affects position
+DECAY_RATE = 0.98  # Position slowly decays toward center (1.0 = no decay)
+MAX_EYE_OFFSET = None  # Will be set based on screen width
+
 
 def read_eye_action_from_file():
     """Read the latest eye action label from the prediction file."""
@@ -98,7 +109,10 @@ def run_game():
 
     global last_eye_action
     global BALL_SPEED_X, BALL_SPEED_Y
-
+    global eye_position, MAX_EYE_OFFSET
+    
+    # Set max offset based on screen width (paddle can go edge to edge)
+    MAX_EYE_OFFSET = (WIDTH - PADDLE_WIDTH) / 2
 
     while True:
         for event in pygame.event.get():
@@ -108,19 +122,36 @@ def run_game():
 
         # ------------------------------
         # EYE CONTROL → Paddle movement (Horizontal)
-        # Read latest action from file
+        # Using POSITION-BASED (INTEGRAL) control
         # ------------------------------
         current_action = read_eye_action_from_file()
         print(current_action)
         
-        if current_action == "left":      # Maps to moving paddle LEFT
-            paddle_x -= PADDLE_SPEED
-        elif current_action == "right":   # Maps to moving paddle RIGHT
-            paddle_x += PADDLE_SPEED
-        elif current_action == "blink":
-            pass  # you could add a power-up or freeze ball
-
-        # Clamp paddle to the screen edges
+        # Apply decay - eye_position slowly returns toward center
+        # This helps filter out brief "return to center" movements
+        eye_position *= DECAY_RATE
+        
+        # Accumulate eye position based on detected movement
+        # Strip whitespace for clean comparison
+        action = current_action.strip().lower() if current_action else ""
+        
+        if action == "left":
+            eye_position -= EYE_SENSITIVITY
+        elif action == "right":
+            eye_position += EYE_SENSITIVITY
+        elif action == "blink":
+            # Optional: reset position to center on blink
+            # eye_position = 0
+            pass
+        
+        # Clamp eye_position to valid range
+        eye_position = max(-MAX_EYE_OFFSET, min(MAX_EYE_OFFSET, eye_position))
+        
+        # Map eye_position to paddle_x (center of screen + offset)
+        center_x = (WIDTH - PADDLE_WIDTH) / 2
+        paddle_x = center_x + eye_position
+        
+        # Clamp paddle to the screen edges (redundant but safe)
         paddle_x = max(0, min(WIDTH - PADDLE_WIDTH, paddle_x))
 
         # ------------------------------
