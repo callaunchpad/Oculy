@@ -10,9 +10,17 @@ from collections import deque
 from queue import SimpleQueue
 from pathlib import Path
 from datetime import datetime
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Dict
 
 import numpy as np
+
+try:
+    from pynput.keyboard import Key, Controller as KeyboardController
+    KEYBOARD_AVAILABLE = True
+except ImportError:
+    Key = None
+    KeyboardController = None
+    KEYBOARD_AVAILABLE = False
 
 try:
     import torch
@@ -38,6 +46,22 @@ CLASSIFIER_MODEL_PATH = Path("models/cnn_a4_caden5/cnn_model_a4.pth")
 CLASSIFIER_TARGET_CHANNEL = "A4"
 CLASSIFICATION_INTERVAL_SEC = 1.0
 ANALOG_START_INDEX = 5  # nSeq + 4 digital IOs precede the analog channels by default.
+
+# Keyboard mapping: maps classification labels to keyboard keys
+# Keys can be Key.left, Key.right, Key.up, Key.down, or regular characters like 'a', 'b', etc.
+KEYBOARD_MAPPING: Dict[str, any] = {}
+if KEYBOARD_AVAILABLE:
+    KEYBOARD_MAPPING = {
+        "left": Key.left,
+        "right": Key.right,
+        # Add more mappings as needed, e.g.:
+        # "up": Key.up,
+        # "down": Key.down,
+        # "blink": Key.space,
+        # "neutral": None,  # None means no key press
+    }
+ENABLE_KEYBOARD_OUTPUT = True  # Set to False to disable keyboard output
+MIN_CONFIDENCE_FOR_KEYPRESS = 0.5  # Only trigger keypress if confidence >= this value
 
 def show_menu():
     print("\nAvailable Commands:")
@@ -395,6 +419,91 @@ class LiveClassifier:
             print(f"[{ts}] 🔮 Predicted {label} ({conf_value:.2f})")
 
 
+class KeyboardKeyController:
+    """Manages keyboard key presses based on classification predictions.
+    
+    Implements "hold" behavior: keeps a key pressed until a different prediction
+    is made. When a new prediction comes in, it releases the old key and presses
+    the new one.
+    """
+    
+    def __init__(self, label_to_key_map: Dict[str, any], min_confidence: float = 0.5):
+        if not KEYBOARD_AVAILABLE:
+            print("⚠️ pynput not available; keyboard output disabled.")
+            self.enabled = False
+            return
+        self.keyboard = KeyboardController()
+        self.label_to_key_map = label_to_key_map
+        self.min_confidence = min_confidence
+        self.current_key = None  # Currently pressed key (Key object or None)
+        self.current_label = None  # Label associated with current key
+        self.lock = threading.Lock()  # Thread-safe key operations
+        self.enabled = True
+        print(f"✅ Keyboard controller initialized. Mapping: {list(label_to_key_map.keys())}")
+    
+    def handle_prediction(self, label: str, confidence: float):
+        """Handle a new prediction: release old key, press new key if mapped."""
+        if not self.enabled:
+            return
+        if confidence < self.min_confidence:
+            # Confidence too low, release any held key
+            self._release_current_key()
+            return
+        
+        # Normalize label (case-insensitive matching)
+        label_normalized = str(label).strip().lower()
+        
+        # Find matching key in mapping (case-insensitive)
+        target_key = None
+        for mapped_label, key in self.label_to_key_map.items():
+            if mapped_label.lower() == label_normalized:
+                target_key = key
+                break
+        
+        # If no mapping found or key is None, release current key
+        if target_key is None:
+            self._release_current_key()
+            return
+        
+        # If same key is already pressed, do nothing
+        with self.lock:
+            if self.current_key == target_key and self.current_label == label:
+                return
+            
+            # Release old key if different
+            if self.current_key is not None and self.current_key != target_key:
+                try:
+                    self.keyboard.release(self.current_key)
+                except Exception as e:
+                    print(f"⚠️ Error releasing key {self.current_key}: {e}")
+            
+            # Press new key
+            try:
+                self.keyboard.press(target_key)
+                self.current_key = target_key
+                self.current_label = label
+            except Exception as e:
+                print(f"⚠️ Error pressing key {target_key} for label '{label}': {e}")
+                self.current_key = None
+                self.current_label = None
+    
+    def _release_current_key(self):
+        """Release the currently held key."""
+        with self.lock:
+            if self.current_key is not None:
+                try:
+                    self.keyboard.release(self.current_key)
+                except Exception as e:
+                    print(f"⚠️ Error releasing key {self.current_key}: {e}")
+                self.current_key = None
+                self.current_label = None
+    
+    def stop(self):
+        """Release any held keys and disable the controller."""
+        self._release_current_key()
+        self.enabled = False
+
+
 class LivePlot:
     def __init__(self, window_size=1000):
         self.data = deque([0]*window_size, maxlen=window_size)
@@ -547,10 +656,22 @@ plotter = LivePlot(window_size=1000)
 update_queue = SimpleQueue()
 classifier = LiveClassifier(CLASSIFIER_MODEL_PATH)
 
+# Initialize keyboard controller if enabled
+keyboard_controller = None
+if ENABLE_KEYBOARD_OUTPUT:
+    keyboard_controller = KeyboardKeyController(
+        label_to_key_map=KEYBOARD_MAPPING,
+        min_confidence=MIN_CONFIDENCE_FOR_KEYPRESS
+    )
+
 def handle_prediction(label: str, confidence: float):
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] 🔮 Predicted {label} ({confidence:.2f})")
     plotter.set_prediction(label, confidence)
+    
+    # Trigger keyboard input if enabled
+    if keyboard_controller and keyboard_controller.enabled:
+        keyboard_controller.handle_prediction(label, confidence)
 
 classifier.set_prediction_callback(handle_prediction)
 
@@ -581,6 +702,8 @@ while True:
         client.setIsAcquiring(False)
     elif user_action == '8':
         client.stop()
+        if keyboard_controller:
+            keyboard_controller.stop()
         break
     msg = action_decode(user_action)
     client.addMsgToSend(msg)
