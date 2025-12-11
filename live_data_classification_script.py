@@ -11,6 +11,7 @@ from queue import SimpleQueue
 from pathlib import Path
 from datetime import datetime
 from typing import Callable, Optional, List, Dict
+from oculy_pong import update_eye_action
 
 import numpy as np
 
@@ -44,7 +45,7 @@ MENU_INPUT = {
 
 CLASSIFIER_MODEL_PATH = Path("models/cnn_a4_caden5/cnn_model_a4.pth")
 CLASSIFIER_TARGET_CHANNEL = "A4"
-CLASSIFICATION_INTERVAL_SEC = 1.0
+CLASSIFICATION_INTERVAL_SEC = 0.1
 ANALOG_START_INDEX = 5  # nSeq + 4 digital IOs precede the analog channels by default.
 
 # Keyboard mapping: maps classification labels to keyboard keys
@@ -54,11 +55,8 @@ if KEYBOARD_AVAILABLE:
     KEYBOARD_MAPPING = {
         "left": Key.left,
         "right": Key.right,
-        # Add more mappings as needed, e.g.:
-        # "up": Key.up,
-        # "down": Key.down,
         # "blink": Key.space,
-        # "neutral": None,  # None means no key press
+        # "neutral": None, 
     }
 ENABLE_KEYBOARD_OUTPUT = True  # Set to False to disable keyboard output
 MIN_CONFIDENCE_FOR_KEYPRESS = 0.5  # Only trigger keypress if confidence >= this value
@@ -421,62 +419,66 @@ class LiveClassifier:
 
 class KeyboardKeyController:
     """Manages keyboard key presses based on classification predictions.
-    
+
     Implements "hold" behavior: keeps a key pressed until a different prediction
-    is made. When a new prediction comes in, it releases the old key and presses
-    the new one.
+    is made, or confidence drops below threshold.
     """
-    
+
     def __init__(self, label_to_key_map: Dict[str, any], min_confidence: float = 0.5):
-        if not KEYBOARD_AVAILABLE:
-            print("⚠️ pynput not available; keyboard output disabled.")
-            self.enabled = False
-            return
-        self.keyboard = KeyboardController()
+        # Always define attributes so methods don't explode even if disabled
         self.label_to_key_map = label_to_key_map
         self.min_confidence = min_confidence
-        self.current_key = None  # Currently pressed key (Key object or None)
-        self.current_label = None  # Label associated with current key
-        self.lock = threading.Lock()  # Thread-safe key operations
+        self.current_key = None          # type: Optional[any]
+        self.current_label = None        # type: Optional[str]
+        self.lock = threading.Lock()
+        self.keyboard = None
+        self.enabled = False
+
+        if not KEYBOARD_AVAILABLE:
+            print("⚠️ pynput not available; keyboard output disabled.")
+            return
+
+        self.keyboard = KeyboardController()
         self.enabled = True
         print(f"✅ Keyboard controller initialized. Mapping: {list(label_to_key_map.keys())}")
-    
+
     def handle_prediction(self, label: str, confidence: float):
         """Handle a new prediction: release old key, press new key if mapped."""
         if not self.enabled:
             return
+
+        # If confidence is too low, release any held key
         if confidence < self.min_confidence:
-            # Confidence too low, release any held key
             self._release_current_key()
             return
-        
-        # Normalize label (case-insensitive matching)
+
+        # Normalize label (case-insensitive)
         label_normalized = str(label).strip().lower()
-        
+
         # Find matching key in mapping (case-insensitive)
         target_key = None
         for mapped_label, key in self.label_to_key_map.items():
             if mapped_label.lower() == label_normalized:
                 target_key = key
                 break
-        
-        # If no mapping found or key is None, release current key
+
+        # If label isn't mapped or mapped to None → release any held key
         if target_key is None:
             self._release_current_key()
             return
-        
-        # If same key is already pressed, do nothing
+
         with self.lock:
+            # Same key already held for same label → nothing to do
             if self.current_key == target_key and self.current_label == label:
                 return
-            
-            # Release old key if different
+
+            # Release previous key if different
             if self.current_key is not None and self.current_key != target_key:
                 try:
                     self.keyboard.release(self.current_key)
                 except Exception as e:
                     print(f"⚠️ Error releasing key {self.current_key}: {e}")
-            
+
             # Press new key
             try:
                 self.keyboard.press(target_key)
@@ -486,9 +488,11 @@ class KeyboardKeyController:
                 print(f"⚠️ Error pressing key {target_key} for label '{label}': {e}")
                 self.current_key = None
                 self.current_label = None
-    
+
     def _release_current_key(self):
-        """Release the currently held key."""
+        """Release the currently held key, if any."""
+        if not self.enabled:
+            return
         with self.lock:
             if self.current_key is not None:
                 try:
@@ -497,7 +501,7 @@ class KeyboardKeyController:
                     print(f"⚠️ Error releasing key {self.current_key}: {e}")
                 self.current_key = None
                 self.current_label = None
-    
+
     def stop(self):
         """Release any held keys and disable the controller."""
         self._release_current_key()
@@ -658,16 +662,29 @@ classifier = LiveClassifier(CLASSIFIER_MODEL_PATH)
 
 # Initialize keyboard controller if enabled
 keyboard_controller = None
-if ENABLE_KEYBOARD_OUTPUT:
+if ENABLE_KEYBOARD_OUTPUT and KEYBOARD_AVAILABLE:
     keyboard_controller = KeyboardKeyController(
         label_to_key_map=KEYBOARD_MAPPING,
         min_confidence=MIN_CONFIDENCE_FOR_KEYPRESS
     )
+elif ENABLE_KEYBOARD_OUTPUT and not KEYBOARD_AVAILABLE:
+    print("⚠️ Keyboard output requested but pynput is not installed; skipping keyboard controller.")
 
 def handle_prediction(label: str, confidence: float):
+    game_file = "/Users/neharavikumar/Oculy/game.txt"
     timestamp = datetime.now().strftime("%H:%M:%S")
+
+    with open(game_file, "w") as file:
+        file.write(label)
     print(f"[{timestamp}] 🔮 Predicted {label} ({confidence:.2f})")
+
     plotter.set_prediction(label, confidence)
+
+    if confidence >= MIN_CONFIDENCE_FOR_KEYPRESS:
+        update_eye_action(label)
+    else:
+        # low confidence → stop paddle
+        update_eye_action("neutral")
     
     # Trigger keyboard input if enabled
     if keyboard_controller and keyboard_controller.enabled:
